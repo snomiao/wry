@@ -40,9 +40,10 @@ fn main() -> wry::Result<()> {
     .with_title("Hello World")
     .build(&event_loop)
     .unwrap();
-  let _webview = WebViewBuilder::new(&window)
+
+  let webview = WebViewBuilder::new()
     .with_url("https://tauri.app")
-    .build()?;
+    .build(&window)?;
 
   event_loop.run(move |event, _, control_flow| {
     *control_flow = ControlFlow::Wait;
@@ -83,8 +84,6 @@ Wry also needs [WebKitGTK](https://webkitgtk.org/) for WebView. So please make s
 sudo pacman -S webkit2gtk-4.1
 ```
 
-The `libayatana-indicator` package can be installed from the Arch User Repository (AUR).
-
 #### Debian / Ubuntu:
 
 ```bash
@@ -97,7 +96,42 @@ sudo apt install libwebkit2gtk-4.1-dev
 sudo dnf install gtk3-devel webkit2gtk4.1-devel
 ```
 
-Fedora does not have the Ayatana package yet, so you need to use the GTK one, see the [feature flags documentation](https://docs.rs/wry/latest/wry/#feature-flags).
+### Nix & NixOS
+
+ ```Nix
+# shell.nix
+
+ let
+    # Unstable Channel | Rolling Release
+    pkgs = import (fetchTarball("channel:nixpkgs-unstable")) { };
+    packages = with pkgs; [
+      pkg-config
+      webkitgtk_4_1
+    ];
+  in
+  pkgs.mkShell {
+    buildInputs = packages;
+  }
+ ```
+
+ ```sh
+ nix-shell shell.nix
+ ```
+
+#### GUIX
+
+ ```scheme
+;; manifest.scm
+
+ (specifications->manifest
+   '("pkg-config"                ; Helper tool used when compiling
+     "webkitgtk"                 ; Web content engine fot GTK+
+  ))
+ ```
+
+```sh
+guix shell -m manifest.scm
+````
 
 ### macOS
 
@@ -123,7 +157,7 @@ If you wish to create Android project yourself, there is a few requirements that
     files that you need to include in your Android application for wry to function properly:
 
     - `WRY_ANDROID_PACKAGE`: which is the reversed domain name of your android project and the app name in snake_case, for example, `com.wry.example.wry_app`
-    - `WRY_ANDROID_LIBRARY`: for example, if your cargo project has a lib name `wry_app`, it will generate `libwry_app.so` so you se this env var to `wry_app`
+    - `WRY_ANDROID_LIBRARY`: for example, if your cargo project has a lib name `wry_app`, it will generate `libwry_app.so` so you set this env var to `wry_app`
     - `WRY_ANDROID_KOTLIN_FILES_OUT_DIR`: for example, `path/to/app/src/main/kotlin/com/wry/example`
 
 2.  Your main Android Activity needs to inherit `AppCompatActivity`, preferably it should use the generated `WryActivity` or inherit it.

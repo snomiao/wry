@@ -14,9 +14,9 @@ jobs:
         platform:
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
-          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: aarch64-apple-ios, os: macos-latest }
-          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-latest }
           - { target: aarch64-linux-android, os: ubuntu-latest }
 
     runs-on: ${{ matrix.platform.os }}
@@ -76,6 +76,8 @@ jobs:
           sudo apt-get update -y -q
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev
       - name: Run cargo doc with each targets
+        env:
+          DOCS_RS: true
         run: |
           set -ex
 

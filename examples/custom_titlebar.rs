@@ -8,8 +8,7 @@ use tao::{
   event_loop::{ControlFlow, EventLoopBuilder},
   window::{CursorIcon, ResizeDirection, Window, WindowBuilder},
 };
-use wry::http::Request;
-use wry::WebViewBuilder;
+use wry::{http::Request, WebViewBuilder};
 
 #[derive(Debug)]
 enum HitTestResult {
@@ -127,6 +126,10 @@ fn main() -> wry::Result<()> {
               box-sizing: border-box;
           }
 
+          *[data-wry-darg-region] {
+            app-region: drag; /* Supported on Windows only, on WebView2 123+ and makes dragging with touch work */
+          }
+
           main {
             display: grid;
             place-items: center;
@@ -169,7 +172,7 @@ fn main() -> wry::Result<()> {
 
   <body>
       <div class="titlebar">
-          <div class="drag-region">Custom Titlebar</div>
+          <div data-wry-darg-region>Custom Titlebar</div>
           <div>
               <div class="titlebar-button" onclick="window.ipc.postMessage('minimize')">
                   <img src="https://api.iconify.design/codicon:chrome-minimize.svg" />
@@ -188,7 +191,7 @@ fn main() -> wry::Result<()> {
       <script>
           document.addEventListener('mousemove', (e) => window.ipc.postMessage(`mousemove:${e.clientX},${e.clientY}`))
           document.addEventListener('mousedown', (e) => {
-              if (e.target.classList.contains('drag-region') && e.buttons === 1) {
+              if (e.target.hasAttribute('data-wry-darg-region') && e.button === 0) {
                   e.detail === 2
                       ? window.ipc.postMessage('maximize')
                       : window.ipc.postMessage('drag_window');
@@ -197,7 +200,7 @@ fn main() -> wry::Result<()> {
               }
           })
           document.addEventListener('touchstart', (e) => {
-              if (e.target.classList.contains('drag-region')) {
+              if (e.target.hasAttribute('data-wry-darg-region')) {
                   window.ipc.postMessage('drag_window');
               }
           })
@@ -238,34 +241,32 @@ fn main() -> wry::Result<()> {
     }
   };
 
+  let builder = WebViewBuilder::new()
+    .with_html(HTML)
+    .with_ipc_handler(handler)
+    .with_accept_first_mouse(true);
+
   #[cfg(any(
     target_os = "windows",
     target_os = "macos",
     target_os = "ios",
     target_os = "android"
   ))]
-  let builder = WebViewBuilder::new(&window);
-
+  let webview = builder.build(&window)?;
   #[cfg(not(any(
     target_os = "windows",
     target_os = "macos",
     target_os = "ios",
     target_os = "android"
   )))]
-  let builder = {
+  let webview = {
     use tao::platform::unix::WindowExtUnix;
     use wry::WebViewBuilderExtUnix;
     let vbox = window.default_vbox().unwrap();
-    WebViewBuilder::new_gtk(vbox)
+    builder.build_gtk(vbox)?
   };
 
-  let mut webview = Some(
-    builder
-      .with_html(HTML)
-      .with_ipc_handler(handler)
-      .with_accept_first_mouse(true)
-      .build()?,
-  );
+  let mut webview = Some(webview);
 
   event_loop.run(move |event, _, control_flow| {
     *control_flow = ControlFlow::Wait;

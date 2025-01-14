@@ -10,16 +10,21 @@ use jni::{
   JNIEnv,
 };
 use once_cell::sync::Lazy;
-use std::{os::unix::prelude::*, sync::atomic::Ordering};
+use std::os::unix::prelude::*;
 
 use super::{find_class, EvalCallback, EVAL_CALLBACKS, EVAL_ID_GENERATOR, PACKAGE};
 
 static CHANNEL: Lazy<(Sender<WebViewMessage>, Receiver<WebViewMessage>)> = Lazy::new(|| bounded(8));
-pub static MAIN_PIPE: Lazy<[RawFd; 2]> = Lazy::new(|| {
+pub static MAIN_PIPE: Lazy<[OwnedFd; 2]> = Lazy::new(|| {
   let mut pipe: [RawFd; 2] = Default::default();
   unsafe { libc::pipe(pipe.as_mut_ptr()) };
-  pipe
+  unsafe { pipe.map(|fd| OwnedFd::from_raw_fd(fd)) }
 });
+
+pub enum MainPipeState {
+  Alive,
+  Destroyed,
+}
 
 pub struct MainPipe<'a> {
   pub env: JNIEnv<'a>,
@@ -32,11 +37,17 @@ impl<'a> MainPipe<'a> {
   pub(crate) fn send(message: WebViewMessage) {
     let size = std::mem::size_of::<bool>();
     if let Ok(()) = CHANNEL.0.send(message) {
-      unsafe { libc::write(MAIN_PIPE[1], &true as *const _ as *const _, size) };
+      unsafe {
+        libc::write(
+          MAIN_PIPE[1].as_raw_fd(),
+          &true as *const _ as *const _,
+          size,
+        )
+      };
     }
   }
 
-  pub fn recv(&mut self) -> JniResult<()> {
+  pub fn recv(&mut self) -> JniResult<MainPipeState> {
     let activity = self.activity.as_obj();
     if let Ok(message) = CHANNEL.1.recv() {
       match message {
@@ -53,6 +64,7 @@ impl<'a> MainPipe<'a> {
             autoplay,
             user_agent,
             initialization_scripts,
+            id,
             ..
           } = attrs;
 
@@ -62,13 +74,15 @@ impl<'a> MainPipe<'a> {
             string_class,
             self.env.new_string("")?,
           )?;
-          for (i, script) in initialization_scripts.into_iter().enumerate() {
+          for (i, (script, _)) in initialization_scripts.into_iter().enumerate() {
             self.env.set_object_array_element(
               &initialization_scripts_array,
               i as i32,
               self.env.new_string(script)?,
             )?;
           }
+
+          let id = self.env.new_string(id)?;
 
           // Create webview
           let rust_webview_class = find_class(
@@ -78,8 +92,12 @@ impl<'a> MainPipe<'a> {
           )?;
           let webview = self.env.new_object(
             &rust_webview_class,
-            "(Landroid/content/Context;[Ljava/lang/String;)V",
-            &[activity.into(), (&initialization_scripts_array).into()],
+            "(Landroid/content/Context;[Ljava/lang/String;Ljava/lang/String;)V",
+            &[
+              activity.into(),
+              (&initialization_scripts_array).into(),
+              (&id).into(),
+            ],
           )?;
 
           // set media autoplay
@@ -199,9 +217,7 @@ impl<'a> MainPipe<'a> {
         }
         WebViewMessage::Eval(script, callback) => {
           if let Some(webview) = &self.webview {
-            let id = EVAL_ID_GENERATOR
-              .get_or_init(Default::default)
-              .fetch_add(1, Ordering::Relaxed);
+            let id = EVAL_ID_GENERATOR.next() as i32;
 
             #[cfg(feature = "tracing")]
             let span = std::sync::Mutex::new(Some(SendEnteredSpan(
@@ -294,9 +310,48 @@ impl<'a> MainPipe<'a> {
               .call_method(webview, "clearAllBrowsingData", "()V", &[])?;
           }
         }
+        WebViewMessage::LoadHtml(html) => {
+          if let Some(webview) = &self.webview {
+            let html = self.env.new_string(html)?;
+            load_html(&mut self.env, webview.as_obj(), &html)?;
+          }
+        }
+        WebViewMessage::GetCookies(tx, url) => {
+          if let Some(webview) = &self.webview {
+            let url = self.env.new_string(url)?;
+            let cookies = self
+              .env
+              .call_method(
+                webview,
+                "getCookies",
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                &[(&url).into()],
+              )
+              .and_then(|v| v.l())
+              .and_then(|s| {
+                let s = JString::from(s);
+                self
+                  .env
+                  .get_string(&s)
+                  .map(|v| v.to_string_lossy().to_string())
+              })
+              .unwrap_or_default();
+
+            tx.send(
+              cookies
+                .split("; ")
+                .flat_map(|c| cookie::Cookie::parse(c.to_string()))
+                .collect(),
+            )
+            .unwrap();
+          }
+        }
+        WebViewMessage::OnDestroy => {
+          return Ok(MainPipeState::Destroyed);
+        }
       }
     }
-    Ok(())
+    Ok(MainPipeState::Alive)
   }
 }
 
@@ -361,12 +416,16 @@ pub(crate) enum WebViewMessage {
   SetBackgroundColor(RGBA),
   GetWebViewVersion(Sender<Result<String, Error>>),
   GetUrl(Sender<String>),
+  GetCookies(Sender<Vec<cookie::Cookie<'static>>>, String),
   Jni(Box<dyn FnOnce(&mut JNIEnv, &JObject, &JObject) + Send>),
   LoadUrl(String, Option<http::HeaderMap>),
+  LoadHtml(String),
   ClearAllBrowsingData,
+  OnDestroy,
 }
 
 pub(crate) struct CreateWebViewAttributes {
+  pub id: String,
   pub url: Option<String>,
   pub html: Option<String>,
   #[cfg(any(debug_assertions, feature = "devtools"))]
@@ -377,7 +436,7 @@ pub(crate) struct CreateWebViewAttributes {
   pub autoplay: bool,
   pub on_webview_created: Option<Box<dyn Fn(super::Context) -> JniResult<()> + Send>>,
   pub user_agent: Option<String>,
-  pub initialization_scripts: Vec<String>,
+  pub initialization_scripts: Vec<(String, bool)>,
 }
 
 // SAFETY: only use this when you are sure the span will be dropped on the same thread it was entered

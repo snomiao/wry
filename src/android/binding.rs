@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use http::{
-  header::{HeaderName, HeaderValue, CONTENT_TYPE},
+  header::{HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE},
   Request,
 };
 use jni::errors::Result as JniResult;
@@ -27,17 +27,19 @@ macro_rules! android_binding {
   ($domain:ident, $package:ident) => {
     ::wry::android_binding!($domain, $package, ::wry)
   };
-  // use import `android_setup` just to force the import path to use `wry::{}`
+  // use imported `android_setup` just to force the import path to use `wry::{}`
   // as the macro breaks without braces
   ($domain:ident, $package:ident, $wry:path) => {{
     use $wry::{android_setup as _, prelude::*};
+
+    android_fn!($domain, $package, WryActivity, onActivityDestroy, [JObject]);
 
     android_fn!(
       $domain,
       $package,
       RustWebViewClient,
       handleRequest,
-      [JObject, jboolean],
+      [JString, JObject, jboolean],
       jobject
     );
     android_fn!(
@@ -100,10 +102,11 @@ macro_rules! android_binding {
 
 fn handle_request(
   env: &mut JNIEnv,
+  webview_id: JString,
   request: JObject,
   is_document_start_script_enabled: jboolean,
 ) -> JniResult<jobject> {
-  if let Some(handler) = REQUEST_HANDLER.get() {
+  if let Some(handler) = REQUEST_HANDLER.borrow().as_ref() {
     #[cfg(feature = "tracing")]
     let span =
       tracing::info_span!(parent: None, "wry::custom_protocol::handle", uri = tracing::field::Empty).entered();
@@ -163,10 +166,17 @@ fn handle_request(
       }
     };
 
+    let webview_id = env.get_string(&webview_id)?;
+    let webview_id = webview_id.to_str().ok().unwrap_or_default();
+
     let response = {
       #[cfg(feature = "tracing")]
       let _span = tracing::info_span!("wry::custom_protocol::call_handler").entered();
-      (handler.handler)(final_request, is_document_start_script_enabled != 0)
+      (handler.handler)(
+        webview_id,
+        final_request,
+        is_document_start_script_enabled != 0,
+      )
     };
     if let Some(response) = response {
       let status = response.status();
@@ -216,6 +226,11 @@ fn handle_request(
       let response_headers = {
         let headers_map = JMap::from_env(env, &obj)?;
         for (name, value) in headers.iter() {
+          // WebResourceResponse will automatically generate Content-Type and
+          // Content-Length headers so we should skip them to avoid duplication.
+          if name == CONTENT_TYPE || name == CONTENT_LENGTH {
+            continue;
+          }
           let key = env.new_string(name)?;
           let value = env.new_string(value.to_str().unwrap_or_default())?;
           headers_map.put(env, &key, &value)?;
@@ -246,13 +261,24 @@ fn handle_request(
 }
 
 #[allow(non_snake_case)]
+pub unsafe fn onActivityDestroy(_: JNIEnv, _: JClass, _: JObject) {
+  super::MainPipe::send(super::WebViewMessage::OnDestroy);
+}
+
+#[allow(non_snake_case)]
 pub unsafe fn handleRequest(
   mut env: JNIEnv,
   _: JClass,
+  webview_id: JString,
   request: JObject,
   is_document_start_script_enabled: jboolean,
 ) -> jobject {
-  match handle_request(&mut env, request, is_document_start_script_enabled) {
+  match handle_request(
+    &mut env,
+    webview_id,
+    request,
+    is_document_start_script_enabled,
+  ) {
     Ok(response) => response,
     Err(e) => {
       #[cfg(feature = "tracing")]
@@ -268,7 +294,8 @@ pub unsafe fn shouldOverride(mut env: JNIEnv, _: JClass, url: JString) -> jboole
     Ok(url) => {
       let url = url.to_string_lossy().to_string();
       URL_LOADING_OVERRIDE
-        .get()
+        .borrow()
+        .as_ref()
         // We negate the result of the function because the logic for the android
         // client is different from how the navigation_handler is defined.
         //
@@ -313,7 +340,7 @@ pub unsafe fn ipc(mut env: JNIEnv, _: JClass, url: JString, body: JString) {
 
       let url = url.to_string_lossy().to_string();
       let body = body.to_string_lossy().to_string();
-      if let Some(ipc) = IPC.get() {
+      if let Some(ipc) = IPC.borrow().as_ref() {
         (ipc.handler)(Request::builder().uri(url).body(body).unwrap())
       }
     }
@@ -329,7 +356,7 @@ pub unsafe fn handleReceivedTitle(mut env: JNIEnv, _: JClass, _webview: JObject,
   match env.get_string(&title) {
     Ok(title) => {
       let title = title.to_string_lossy().to_string();
-      if let Some(title_handler) = TITLE_CHANGE_HANDLER.get() {
+      if let Some(title_handler) = TITLE_CHANGE_HANDLER.borrow().as_ref() {
         (title_handler.handler)(title)
       }
     }
@@ -342,12 +369,12 @@ pub unsafe fn handleReceivedTitle(mut env: JNIEnv, _: JClass, _webview: JObject,
 
 #[allow(non_snake_case)]
 pub unsafe fn withAssetLoader(_: JNIEnv, _: JClass) -> jboolean {
-  (*WITH_ASSET_LOADER.get().unwrap_or(&false)).into()
+  (*WITH_ASSET_LOADER.borrow().as_ref().unwrap_or(&false)).into()
 }
 
 #[allow(non_snake_case)]
 pub unsafe fn assetLoaderDomain(env: JNIEnv, _: JClass) -> jstring {
-  if let Some(domain) = ASSET_LOADER_DOMAIN.get() {
+  if let Some(domain) = ASSET_LOADER_DOMAIN.borrow().as_ref() {
     env.new_string(domain).unwrap().as_raw()
   } else {
     env.new_string("wry.assets").unwrap().as_raw()
@@ -359,7 +386,7 @@ pub unsafe fn onPageLoading(mut env: JNIEnv, _: JClass, url: JString) {
   match env.get_string(&url) {
     Ok(url) => {
       let url = url.to_string_lossy().to_string();
-      if let Some(on_load) = ON_LOAD_HANDLER.get() {
+      if let Some(on_load) = ON_LOAD_HANDLER.borrow().as_ref() {
         (on_load.handler)(PageLoadEvent::Started, url)
       }
     }
@@ -375,7 +402,7 @@ pub unsafe fn onPageLoaded(mut env: JNIEnv, _: JClass, url: JString) {
   match env.get_string(&url) {
     Ok(url) => {
       let url = url.to_string_lossy().to_string();
-      if let Some(on_load) = ON_LOAD_HANDLER.get() {
+      if let Some(on_load) = ON_LOAD_HANDLER.borrow().as_ref() {
         (on_load.handler)(PageLoadEvent::Finished, url)
       }
     }

@@ -28,6 +28,9 @@ pub enum Error {
   NulError(#[from] std::ffi::NulError),
   #[error(transparent)]
   ReceiverError(#[from] std::sync::mpsc::RecvError),
+  #[cfg(target_os = "android")]
+  #[error(transparent)]
+  ReceiverTimeoutError(#[from] crossbeam_channel::RecvTimeoutError),
   #[error(transparent)]
   SenderError(#[from] std::sync::mpsc::SendError<String>),
   #[error("Failed to send the message")]
@@ -37,8 +40,6 @@ pub enum Error {
   #[cfg(target_os = "windows")]
   #[error("WebView2 error: {0}")]
   WebView2Error(webview2_com::Error),
-  #[error("Duplicate custom protocol registered: {0}")]
-  DuplicateCustomProtocol(String),
   #[error(transparent)]
   HttpError(#[from] http::Error),
   #[error("Infallible error, something went really wrong: {0}")]
@@ -57,4 +58,17 @@ pub enum Error {
   #[cfg(target_os = "android")]
   #[error(transparent)]
   CrossBeamRecvError(#[from] crossbeam_channel::RecvError),
+  #[error("not on the main thread")]
+  NotMainThread,
+  #[error("Custom protocol task is invalid.")]
+  CustomProtocolTaskInvalid,
+  #[error("Failed to register URL scheme: {0}, could be due to invalid URL scheme or the scheme is already registered.")]
+  UrlSchemeRegisterError(String),
+  #[error("Duplicate custom protocol registered on Linux: {0}")]
+  DuplicateCustomProtocol(String),
+  #[error("Duplicate custom protocol registered on the same web context on Linux: {0}")]
+  ContextDuplicateCustomProtocol(String),
+  #[error(transparent)]
+  #[cfg(any(target_os = "macos", target_os = "ios"))]
+  UrlPrase(#[from] url::ParseError),
 }
